@@ -5,7 +5,6 @@ package main
 
 import (
 	"crypto/tls"
-	"io"
 	"log"
 	"net"
 	"os"
@@ -23,20 +22,15 @@ import (
 	"gopkg.in/mgo.v2"
 )
 
-// TODO:
-// refuse to run if raft exists
-// allow specifying location of raft dir
-// and machine agent conf
-// quiet mode to hide info output
-
 const rebootstrapDoc = `
 
 Recreate an empty raft cluster directory with server configuration
-based on the current replicaset members. This should only be run on a
-controller machine, while the machine agent is stopped. For safety it
+based on the current replicaset members. This should be run as root on
+a controller machine while the machine agent is stopped. For safety it
 won't run if there's a raft directory already.
 
-You can determine the password for Juju's MongoDB by looking in the machine agent's configuration file using the following command:
+You can determine the password for Juju's MongoDB by looking in the
+machine agent's configuration file using the following command:
 
      sudo grep oldpassword /var/lib/juju/agents/machine-*/agent.conf  | cut -d' ' -f2
 
@@ -50,7 +44,7 @@ var logger = loggo.GetLogger("rebootstrap-raft")
 
 type rebootstrapCommand struct {
 	cmd.CommandBase
-	quiet     bool
+	verbose   bool
 	raftDir   string
 	apiPort   int
 	machineID string
@@ -74,7 +68,7 @@ func (c *rebootstrapCommand) Info() *cmd.Info {
 // SetFlags is part of cmd.Command.
 func (c *rebootstrapCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.CommandBase.SetFlags(f)
-	f.BoolVar(&c.quiet, "quiet", false, "suppress info messages")
+	f.BoolVar(&c.verbose, "verbose", false, "show debug logging")
 	f.StringVar(&c.raftDir, "raftDir", "/var/lib/juju/raft", "raft directory location")
 	f.StringVar(&c.machineID, "machineID", "0", "machine ID of this Juju controller")
 	f.IntVar(&c.apiPort, "apiPort", 17070, "the API port of the Juju controller")
@@ -86,21 +80,34 @@ func (c *rebootstrapCommand) SetFlags(f *gnuflag.FlagSet) {
 	f.StringVar(&c.password, "password", "", "password for connecting to MongoDB")
 }
 
+// Init is part of cmd.Command.
+func (c *rebootstrapCommand) Init(args []string) error {
+	if c.verbose {
+		logger.SetLogLevel(loggo.DEBUG)
+	}
+	return c.CommandBase.Init(args)
+}
+
 // Run is part of cmd.Command.
 func (c *rebootstrapCommand) Run(ctx *cmd.Context) error {
 	_, err := os.Stat(c.raftDir)
 	if err == nil {
-		return errors.Errorf("raft dir %q already exists - remove it first to show your commitment", c.raftDir)
+		return errors.Errorf("raft directory %q already exists - remove it first to show your commitment", c.raftDir)
 	}
 
 	members, err := c.getReplicaSetMembers()
 	if err != nil {
 		return errors.Annotate(err, "getting replica set members")
 	}
+	logger.Infof("Got replica set members.")
 
 	raftServers, err := makeRaftServers(members, c.apiPort)
 	if err != nil {
 		return errors.Annotate(err, "constructing raft server configuration")
+	}
+	logger.Infof("Raft server info:")
+	for _, server := range raftServers.Servers {
+		logger.Infof("%#v", server)
 	}
 
 	return errors.Trace(c.bootstrapRaft(raftServers))
@@ -136,7 +143,11 @@ func (c *rebootstrapCommand) bootstrapRaft(servers raft.Configuration) error {
 
 	err = raft.BootstrapCluster(config, logStore, logStore, snapshotStore, transport, servers)
 
-	return errors.Annotate(err, "bootstrapping raft cluster")
+	if err != nil {
+		return errors.Annotate(err, "bootstrapping raft cluster")
+	}
+	logger.Infof("Raft cluster store bootstrapped in %q.", c.raftDir)
+	return nil
 }
 
 func makeRaftConfig(machineID string) (*raft.Config, error) {
@@ -217,7 +228,7 @@ func NewSnapshotStore(
 	return snaps, nil
 }
 
-// LoggoWriter is an io.Writer that will call the embedded
+// loggoWriter is an io.Writer that will call the embedded
 // logger's Log method for each Write, using the specified
 // log level.
 type loggoWriter struct {
@@ -229,25 +240,6 @@ type loggoWriter struct {
 func (w *loggoWriter) Write(p []byte) (int, error) {
 	w.logger.Logf(w.level, "%s", p[:len(p)-1]) // omit trailing newline
 	return len(p), nil
-}
-
-// BootstrapFSM is a minimal implementation of raft.FSM for use during
-// bootstrap. Its methods should never be invoked.
-type BootstrapFSM struct{}
-
-// Apply is part of raft.FSM.
-func (BootstrapFSM) Apply(log *raft.Log) interface{} {
-	panic("Apply should not be called during bootstrap")
-}
-
-// Snapshot is part of raft.FSM.
-func (BootstrapFSM) Snapshot() (raft.FSMSnapshot, error) {
-	panic("Snapshot should not be called during bootstrap")
-}
-
-// Restore is part of raft.FSM.
-func (BootstrapFSM) Restore(io.ReadCloser) error {
-	panic("Restore should not be called during bootstrap")
 }
 
 func (c *rebootstrapCommand) dial() (*mgo.Session, error) {
