@@ -5,6 +5,7 @@ package main
 
 import (
 	"crypto/tls"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -32,7 +33,7 @@ won't run if there's a raft directory already.
 You can determine the password for Juju's MongoDB by looking in the
 machine agent's configuration file using the following command:
 
-     sudo grep oldpassword /var/lib/juju/agents/machine-*/agent.conf  | cut -d' ' -f2
+     sudo grep statepassword /var/lib/juju/agents/machine-*/agent.conf  | cut -d' ' -f2
 
 `
 
@@ -45,13 +46,13 @@ var logger = loggo.GetLogger("rebootstrap-raft")
 type rebootstrapCommand struct {
 	cmd.CommandBase
 	verbose   bool
+	dryRun    bool
 	raftDir   string
 	apiPort   int
 	machineID string
 	hostname  string
 	mongoPort string
 	ssl       bool
-	username  string
 	password  string
 }
 
@@ -59,7 +60,7 @@ type rebootstrapCommand struct {
 func (c *rebootstrapCommand) Info() *cmd.Info {
 	return &cmd.Info{
 		Name:    "rebootstrap-raft",
-		Args:    "",
+		Args:    "--machine-id <id> --password <password>",
 		Purpose: "Recreate a juju raft cluster directory.",
 		Doc:     strings.TrimSpace(rebootstrapDoc),
 	}
@@ -69,20 +70,25 @@ func (c *rebootstrapCommand) Info() *cmd.Info {
 func (c *rebootstrapCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.CommandBase.SetFlags(f)
 	f.BoolVar(&c.verbose, "verbose", false, "show debug logging")
-	f.StringVar(&c.raftDir, "raftDir", "/var/lib/juju/raft", "raft directory location")
-	f.StringVar(&c.machineID, "machineID", "0", "machine ID of this Juju controller")
-	f.IntVar(&c.apiPort, "apiPort", 17070, "the API port of the Juju controller")
+	f.BoolVar(&c.dryRun, "dry-run", false, "build the configuration but don't bootstrap raft")
+	f.StringVar(&c.raftDir, "raft-dir", "/var/lib/juju/raft", "raft directory location")
+	f.StringVar(&c.machineID, "machine-id", "", "ID of this Juju controller machine")
+	f.IntVar(&c.apiPort, "api-port", 17070, "the API port of the Juju controller")
 	f.StringVar(&c.hostname, "hostname", "localhost", "the hostname of the Juju MongoDB server")
-	f.StringVar(&c.mongoPort, "mongoPort", "37017", "the port of the Juju MongoDB server")
+	f.StringVar(&c.mongoPort, "mongo-port", "37017", "the port of the Juju MongoDB server")
 	f.BoolVar(&c.ssl, "ssl", true, "use SSL to connect to MongoDB ")
-	f.StringVar(&c.username, "username", "admin",
-		"user for connecting to MongoDB (use \"\" for no authentication)")
 	f.StringVar(&c.password, "password", "", "password for connecting to MongoDB")
 }
 
 // Init is part of cmd.Command.
 func (c *rebootstrapCommand) Init(args []string) error {
-	if c.verbose {
+	if c.machineID == "" {
+		return errors.Errorf("machineID is required")
+	}
+	if c.password == "" {
+		return errors.Errorf("password is required")
+	}
+	if c.verbose || c.dryRun {
 		logger.SetLogLevel(loggo.DEBUG)
 	}
 	return c.CommandBase.Init(args)
@@ -91,7 +97,7 @@ func (c *rebootstrapCommand) Init(args []string) error {
 // Run is part of cmd.Command.
 func (c *rebootstrapCommand) Run(ctx *cmd.Context) error {
 	_, err := os.Stat(c.raftDir)
-	if err == nil {
+	if err == nil && !c.dryRun {
 		return errors.Errorf("raft directory %q already exists - remove it first to show your commitment", c.raftDir)
 	}
 
@@ -110,6 +116,10 @@ func (c *rebootstrapCommand) Run(ctx *cmd.Context) error {
 		logger.Infof("%#v", server)
 	}
 
+	if c.dryRun {
+		logger.Infof("dry-run specified - stopping")
+		return nil
+	}
 	return errors.Trace(c.bootstrapRaft(raftServers))
 }
 
@@ -244,12 +254,10 @@ func (w *loggoWriter) Write(p []byte) (int, error) {
 
 func (c *rebootstrapCommand) dial() (*mgo.Session, error) {
 	info := &mgo.DialInfo{
-		Addrs: []string{net.JoinHostPort(c.hostname, c.mongoPort)},
-	}
-	if c.username != "" {
-		info.Database = "admin"
-		info.Username = c.username
-		info.Password = c.password
+		Addrs:    []string{net.JoinHostPort(c.hostname, c.mongoPort)},
+		Database: "admin",
+		Username: fmt.Sprintf("machine-%s", c.machineID),
+		Password: c.password,
 	}
 	if c.ssl {
 		info.DialServer = dialSSL
