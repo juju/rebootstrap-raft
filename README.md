@@ -15,9 +15,7 @@ controller agent is started.
 # Installing
 
 ```
-go get github.com/juju/rebootstrap-raft
-cd $GOPATH/src/github.com/juju/rebootstrap-raft
-go install ./...
+go get github.com/juju/rebootstrap-raft/...
 ```
 
 # Running
