@@ -1,0 +1,32 @@
+name: rebootstrap-raft
+base: core24
+adopt-info: rebootstrap-raft
+summary: Recovery tool for broken Juju raft clusters
+description: |
+  This is my-snap's description. You have a paragraph or two to tell the
+  most important story about your snap. Keep it under 100 words though,
+  we live in tweetspace and your description wants to look good in the snap
+  store.
+
+grade: stable
+confinement: strict
+
+apps:
+  rebootstrap-raft:
+    command: bin/rebootstrap-raft
+
+parts:
+  rebootstrap-raft:
+    plugin: go
+    source: .
+    build-environment:
+      # Disable CGO so that we get a static binary
+      - CGO_ENABLED: "0"
+    build-snaps:
+      - go
+    build-packages:
+      - git
+    override-pull: |
+      set -e -u -x
+      craftctl default
+      craftctl set version=$(git describe --tags)
