@@ -1,8 +1,11 @@
 module github.com/juju/rebootstrap-raft
 
-go 1.23.7
+go 1.24
+
+toolchain go1.24.1
 
 require (
+	github.com/hashicorp/go-hclog v1.6.2
 	github.com/hashicorp/raft v1.7.2
 	github.com/hashicorp/raft-boltdb v0.0.0-20250225060035-8f7048cdfa53
 	github.com/juju/cmd v0.0.0-20200108104440-8e43f3faa5c9
@@ -11,13 +14,13 @@ require (
 	github.com/juju/loggo v1.0.0
 	github.com/juju/mgo/v2 v2.0.0-20210302023703-70d5d206e208
 	github.com/juju/replicaset v0.0.0-20210302050932-0303c8575745
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
 	github.com/armon/go-metrics v0.4.1 // indirect
 	github.com/boltdb/bolt v1.3.1 // indirect
 	github.com/fatih/color v1.13.0 // indirect
-	github.com/hashicorp/go-hclog v1.6.2 // indirect
 	github.com/hashicorp/go-immutable-radix v1.0.0 // indirect
 	github.com/hashicorp/go-metrics v0.5.4 // indirect
 	github.com/hashicorp/go-msgpack v0.5.5 // indirect

@@ -6,6 +6,7 @@ package main
 import (
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"github.com/juju/loggo"
 	"github.com/juju/mgo/v2"
 	"github.com/juju/replicaset"
+	"gopkg.in/yaml.v3"
 )
 
 const rebootstrapDoc = `
@@ -42,6 +44,10 @@ machine agent's configuration file using the following command:
 const jujuMachineKey = "juju-machine-id"
 
 var logger = loggo.GetLogger("rebootstrap-raft")
+
+var openFile = func(name string) (io.ReadCloser, error) {
+	return os.Open(name)
+}
 
 type rebootstrapCommand struct {
 	cmd.CommandBase
@@ -82,12 +88,6 @@ func (c *rebootstrapCommand) SetFlags(f *gnuflag.FlagSet) {
 
 // Init is part of cmd.Command.
 func (c *rebootstrapCommand) Init(args []string) error {
-	if c.machineID == "" {
-		return errors.Errorf("machineID is required")
-	}
-	if c.password == "" {
-		return errors.Errorf("password is required")
-	}
 	if c.verbose || c.dryRun {
 		logger.SetLogLevel(loggo.DEBUG)
 	}
@@ -99,6 +99,22 @@ func (c *rebootstrapCommand) Run(ctx *cmd.Context) error {
 	_, err := os.Stat(c.raftDir)
 	if err == nil && !c.dryRun {
 		return errors.Errorf("raft directory %q already exists - remove it first to show your commitment", c.raftDir)
+	}
+
+	if c.machineID == "" {
+		c.machineID, err = c.getMachineID()
+		if err != nil {
+			return errors.Annotate(err, "getting machine IDs")
+		}
+		logger.Infof("Got machine ID: %s", c.machineID)
+	}
+
+	if c.password == "" {
+		c.password, err = c.getStatePassword(c.machineID)
+		if err != nil {
+			return errors.Annotate(err, "getting state password")
+		}
+		logger.Infof("Got state password")
 	}
 
 	members, err := c.getReplicaSetMembers()
@@ -121,6 +137,52 @@ func (c *rebootstrapCommand) Run(ctx *cmd.Context) error {
 		return nil
 	}
 	return errors.Trace(c.bootstrapRaft(raftServers))
+}
+
+func (c *rebootstrapCommand) getStatePassword(machineID string) (string, error) {
+	agentConfigPath := fmt.Sprintf("/var/lib/juju/agents/machine-%s/agent.conf", machineID)
+	file, err := openFile(agentConfigPath)
+	if err != nil {
+		return "", errors.Annotatef(err, "opening agent config file %q", agentConfigPath)
+	}
+	defer file.Close()
+
+	var config map[string]interface{}
+	decoder := yaml.NewDecoder(file)
+	if err := decoder.Decode(&config); err != nil {
+		return "", errors.Annotatef(err, "decoding yaml from %q", agentConfigPath)
+	}
+
+	password, ok := config["statepassword"].(string)
+	if !ok || password == "" {
+		return "", errors.Errorf("statepassword not found in %q", agentConfigPath)
+	}
+
+	return password, nil
+}
+
+func (c *rebootstrapCommand) getMachineID() (string, error) {
+	const agentDirectory = "/var/lib/juju/agents"
+	entries, err := os.ReadDir(agentDirectory)
+	if err != nil {
+		return "", errors.Annotatef(err, "reading directory %q", agentDirectory)
+	}
+	var machineIDs []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if strings.HasPrefix(entry.Name(), "machine-") {
+			machineIDString := strings.TrimPrefix(entry.Name(), "machine-")
+			if _, err := strconv.Atoi(machineIDString); err == nil {
+				machineIDs = append(machineIDs, machineIDString)
+			}
+		}
+	}
+	if len(machineIDs) != 1 {
+		return "", errors.Errorf("expected exactly one machine ID, got %d", len(machineIDs))
+	}
+	return machineIDs[0], nil
 }
 
 func (c *rebootstrapCommand) getReplicaSetMembers() ([]replicaset.Member, error) {
@@ -240,20 +302,6 @@ func NewSnapshotStore(
 		return nil, errors.Annotate(err, "failed to create file snapshot store")
 	}
 	return snaps, nil
-}
-
-// loggoWriter is an io.Writer that will call the embedded
-// logger's Log method for each Write, using the specified
-// log level.
-type loggoWriter struct {
-	logger loggo.Logger
-	level  loggo.Level
-}
-
-// Write is part of the io.Writer interface.
-func (w *loggoWriter) Write(p []byte) (int, error) {
-	w.logger.Logf(w.level, "%s", p[:len(p)-1]) // omit trailing newline
-	return len(p), nil
 }
 
 func (c *rebootstrapCommand) dial() (*mgo.Session, error) {
