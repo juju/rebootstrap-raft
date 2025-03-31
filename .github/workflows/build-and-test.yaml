@@ -3,6 +3,8 @@ name: Build and Test
 on:
   push:
     branches: ["main"]
+  pull_request:
+    branches: ["main"]
 
 jobs:
   build-and-test:
@@ -17,4 +19,4 @@ jobs:
       - name: Build
         run: go build ./...
       - name: Test
-        run: go test ./...
+        run: go test -v ./...
