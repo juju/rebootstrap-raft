@@ -15,13 +15,23 @@ description: |
   information, it will be replicated to this one when the controller agent
   is started.
 
-
 grade: stable
 confinement: strict
 
 apps:
   rebootstrap-raft:
     command: bin/rebootstrap-raft
+    plugs:
+      - var-lib-juju
+      - network
+
+plugs:
+  var-lib-juju:
+    interface: system-files
+    read:
+      - /var/lib/snapd/hostfs/var/lib/juju
+    write:
+      - /var/lib/snapd/hostfs/var/lib/juju
 
 parts:
   rebootstrap-raft:

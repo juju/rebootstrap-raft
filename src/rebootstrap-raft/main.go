@@ -15,7 +15,7 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
-	"github.com/hashicorp/raft-boltdb"
+	raftboltdb "github.com/hashicorp/raft-boltdb"
 	"github.com/juju/cmd"
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
@@ -47,15 +47,16 @@ var logger = loggo.GetLogger("rebootstrap-raft")
 
 type rebootstrapCommand struct {
 	cmd.CommandBase
-	verbose   bool
-	dryRun    bool
-	raftDir   string
 	apiPort   int
-	machineID string
+	asSnap    bool
+	dryRun    bool
 	hostname  string
+	jujuDir   string
+	machineID string
 	mongoPort string
-	ssl       bool
 	password  string
+	ssl       bool
+	verbose   bool
 }
 
 // Info is part of cmd.Command.
@@ -71,14 +72,14 @@ func (c *rebootstrapCommand) Info() *cmd.Info {
 // SetFlags is part of cmd.Command.
 func (c *rebootstrapCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.CommandBase.SetFlags(f)
-	f.BoolVar(&c.verbose, "verbose", false, "show debug logging")
 	f.BoolVar(&c.dryRun, "dry-run", false, "build the configuration but don't bootstrap raft")
-	f.StringVar(&c.raftDir, "raft-dir", "/var/lib/juju/raft", "raft directory location")
-	f.StringVar(&c.machineID, "machine-id", "", "ID of this Juju controller machine")
+	f.BoolVar(&c.ssl, "ssl", true, "use SSL to connect to MongoDB ")
+	f.BoolVar(&c.verbose, "verbose", false, "show debug logging")
 	f.IntVar(&c.apiPort, "api-port", 17070, "the API port of the Juju controller")
 	f.StringVar(&c.hostname, "hostname", "localhost", "the hostname of the Juju MongoDB server")
+	f.StringVar(&c.jujuDir, "juju-dir", "/var/lib/juju", "path of jujud files")
+	f.StringVar(&c.machineID, "machine-id", "", "ID of this Juju controller machine")
 	f.StringVar(&c.mongoPort, "mongo-port", "37017", "the port of the Juju MongoDB server")
-	f.BoolVar(&c.ssl, "ssl", true, "use SSL to connect to MongoDB ")
 	f.StringVar(&c.password, "password", "", "password for connecting to MongoDB")
 }
 
@@ -86,19 +87,43 @@ func (c *rebootstrapCommand) SetFlags(f *gnuflag.FlagSet) {
 func (c *rebootstrapCommand) Init(args []string) error {
 	if c.verbose || c.dryRun {
 		logger.SetLogLevel(loggo.DEBUG)
+
+	}
+	_, c.asSnap = os.LookupEnv("SNAP")
+	if c.asSnap {
+		logger.Debugf("Running inside a snap")
 	}
 	return c.CommandBase.Init(args)
 }
 
+// getJujuPath returns the path to the `subPath` inside `c.jujuDir`, potentially modified for snap confinement.
+//
+// When we are running inside a confined snap `/var/lib` gets remounted to `/var/lib/hostfs/var/lib`. This
+// should be transparent to the user (`c.jujuDir` should always be what a user would expect, regardless
+// of whether the execution is within a confined snap).
+//
+// If the `snapify` boolean argument is true, the function returns the potentially modified path taking into
+// account whether the execution is within a strictly confined snap. However, for logging, `snapify=false`
+// should be used in order to avoid confusion on the user's part.
+func (c *rebootstrapCommand) getJujuPath(subPath string, snapify bool) string {
+	jujuBaseDir := c.jujuDir
+	if snapify && c.asSnap {
+		jujuBaseDir = filepath.Join("/var/lib/snapd/hostfs", jujuBaseDir)
+	}
+	return filepath.Join(jujuBaseDir, subPath)
+}
+
 // Run is part of cmd.Command.
 func (c *rebootstrapCommand) Run(ctx *cmd.Context) error {
-	_, err := os.Stat(c.raftDir)
+	_, err := os.Stat(c.getJujuPath("raft", true))
 	if err == nil && !c.dryRun {
-		return errors.Errorf("raft directory %q already exists - remove it first to show your commitment", c.raftDir)
+		return errors.Errorf("raft directory %q already exists - remove it first to show your commitment",
+			c.getJujuPath("raft", false))
 	}
+	logger.Infof("Will create raft directory %q", c.getJujuPath("raft", false))
 
 	if c.machineID == "" {
-		c.machineID, err = c.getMachineID("/var/lib/juju/agents")
+		c.machineID, err = c.getMachineID("agents")
 		if err != nil {
 			return errors.Annotate(err, "getting machine IDs")
 		}
@@ -106,7 +131,7 @@ func (c *rebootstrapCommand) Run(ctx *cmd.Context) error {
 	}
 
 	if c.password == "" {
-		c.password, err = c.getStatePassword(c.machineID, "/var/lib/juju/agents")
+		c.password, err = c.getStatePassword(c.machineID, "agents")
 		if err != nil {
 			return errors.Annotate(err, "getting state password")
 		}
@@ -136,8 +161,9 @@ func (c *rebootstrapCommand) Run(ctx *cmd.Context) error {
 }
 
 func (c *rebootstrapCommand) getStatePassword(machineID string, agentDirectory string) (string, error) {
-	agentConfigPath := fmt.Sprintf(agentDirectory + "/machine-%s/agent.conf", machineID)
-	file, err := os.Open(agentConfigPath)
+	agentConfigPath := filepath.Join(agentDirectory, fmt.Sprintf("machine-%s/agent.conf", machineID))
+	logger.Infof("looking for agent config in %q", c.getJujuPath(agentConfigPath, false))
+	file, err := os.Open(c.getJujuPath(agentConfigPath, true))
 	if err != nil {
 		return "", errors.Annotatef(err, "opening agent config file %q", agentConfigPath)
 	}
@@ -146,6 +172,7 @@ func (c *rebootstrapCommand) getStatePassword(machineID string, agentDirectory s
 	if err != nil {
 		return "", errors.Annotatef(err, "extracting state password from %q", agentConfigPath)
 	}
+	logger.Infof("Successfully extracted state password for machine ID %q", machineID)
 	return password, nil
 }
 
@@ -165,9 +192,10 @@ func (c *rebootstrapCommand) extractStatePassword(file io.Reader) (string, error
 }
 
 func (c *rebootstrapCommand) getMachineID(agentDirectory string) (string, error) {
-	entries, err := os.ReadDir(agentDirectory)
+	logger.Infof("looking for machine ID in %q", c.getJujuPath(agentDirectory, false))
+	entries, err := os.ReadDir(c.getJujuPath(agentDirectory, true))
 	if err != nil {
-		return "", errors.Annotatef(err, "reading directory %q", agentDirectory)
+		return "", errors.Annotatef(err, "reading directory %q", c.getJujuPath(agentDirectory, false))
 	}
 	var machineIDs []string
 	for _, entry := range entries {
@@ -200,27 +228,29 @@ func (c *rebootstrapCommand) bootstrapRaft(servers raft.Configuration) error {
 	_, transport := raft.NewInmemTransport(raft.ServerAddress("notused"))
 	defer transport.Close()
 
-	logStore, err := NewLogStore(c.raftDir)
+	logStore, err := NewLogStore(c.getJujuPath("raft", true))
 	if err != nil {
 		return errors.Annotate(err, "making log store")
 	}
+	logger.Infof("New raft log store created in %q.", c.getJujuPath("raft", false))
 
-	snapshotStore, err := NewSnapshotStore(c.raftDir, 2)
+	snapshotStore, err := NewSnapshotStore(c.getJujuPath("raft", true), 2)
 	if err != nil {
 		return errors.Annotate(err, "making snapshot store")
 	}
+	logger.Infof("New raft snapshot store created in %q.", c.getJujuPath("raft", false))
 
 	config, err := makeRaftConfig(c.machineID)
 	if err != nil {
 		return errors.Annotate(err, "making raft config")
 	}
+	logger.Infof("New raft config created")
 
 	err = raft.BootstrapCluster(config, logStore, logStore, snapshotStore, transport, servers)
-
 	if err != nil {
 		return errors.Annotate(err, "bootstrapping raft cluster")
 	}
-	logger.Infof("Raft cluster store bootstrapped in %q.", c.raftDir)
+	logger.Infof("New raft cluster store bootstrapped in %q.", c.getJujuPath("raft", false))
 	return nil
 }
 
